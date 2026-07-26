@@ -1,0 +1,86 @@
+services:
+  nginx:
+    image: nginx:alpine
+    container_name: cyber-nginx
+    ports:
+      - "80:80"
+      - "81:81"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - frontend-global
+    networks:
+      - bridge-fr
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+
+  frontend-global:
+    build: ./frontend
+    
+    volumes:
+      - ./frontend/vote:/usr/local/app/vote
+      - ./frontend/result:/usr/local/app/result
+      # Le volume anonyme empêche Windows d'écraser les modules du conteneur
+      - /usr/local/app/result/node_modules
+    networks:
+      - bridge-fr
+      - bridge-bk
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+
+  # CONTENEUR 2 : BACKEND (Redis + Worker)
+  backend-global:
+    build: ./backend
+    container_name: backend-global
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      bridge-db:
+      bridge-bk:
+        aliases:
+          - redis
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+
+  db:
+    image: postgres:15-alpine
+    container_name: cyber-db
+    environment:
+      POSTGRES_USER: "postgres"
+      POSTGRES_PASSWORD: "postgres"
+    volumes:
+      - "db-data:/var/lib/postgresql/data"
+    healthcheck:
+      # Utilisation directe de pg_isready (sans passer par un script externe)
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - bridge-db
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+
+volumes:
+  db-data:
+
+networks:
+  bridge-fr:
+    driver: bridge
+  bridge-bk:
+    driver: bridge
+  bridge-db:
+    driver: bridge

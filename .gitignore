@@ -1,0 +1,19 @@
+# Dépendances Node.js (régénérées automatiquement, inutile de les envoyer)
+node_modules/
+
+# Fichiers Python compilés
+__pycache__/
+*.pyc
+
+# Résultats de tests, logs, captures de stats (fichiers de travail, pas du code)
+docker-stats-*.txt
+docker-stats-*.csv
+supervision-log.csv
+.pytest_cache/
+
+# Fichiers sensibles ou de sauvegarde
+nginx.conf.protected.bak
+
+# Fichiers système Windows
+Thumbs.db
+desktop.ini
