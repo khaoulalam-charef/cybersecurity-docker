@@ -1,0 +1,38 @@
+name: Tests automatisés
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test-playwright:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Récupérer le code
+        uses: actions/checkout@v4
+
+      - name: Installer Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Installer les dépendances
+        run: |
+          pip install pytest playwright pytest-playwright
+          playwright install --with-deps chromium
+
+      - name: Lancer l'application (Docker Compose)
+        run: docker compose up -d
+
+      - name: Attendre que l'application soit prête
+        run: sleep 15
+
+      - name: Lancer les tests Playwright
+        run: pytest test_vote_playwright.py -v
+
+      - name: Arrêter l'application
+        if: always()
+        run: docker compose down
