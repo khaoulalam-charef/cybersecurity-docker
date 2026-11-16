@@ -1,9 +1,28 @@
-# Projet — Sécurisation Docker Voting App
+# Sécurisation d'une application Docker — Voting App
 
-Ce dossier contient un projet de sécurisation d'une application Docker (basée sur
-`dockersamples/example-voting-app`), avec segmentation réseau, pare-feu, WAF/rate
-limiting, durcissement des conteneurs, load balancing, et simulation d'attaques DDoS
-pour valider l'efficacité des protections.
+Sécurisation complète d'une application multi-conteneurs (basée sur
+[`dockersamples/example-voting-app`](https://github.com/dockersamples/example-voting-app)) :
+segmentation réseau, reverse proxy NGINX avec rate limiting, durcissement des conteneurs,
+load balancing, supervision, et **simulation d'attaques DDoS avec k6** pour mesurer
+l'efficacité des protections avant/après.
+
+> Projet réalisé dans le cadre de mon stage chez **LafargeHolcim Maroc** (été 2026).
+> Auteure : **Khaoula Lamcharef** — élève-ingénieure cybersécurité, ENSIBS (Vannes).
+
+---
+
+## Technologies
+
+| Domaine | Outils |
+|---|---|
+| Conteneurisation | Docker, Docker Compose |
+| Reverse proxy / protection | NGINX (rate limiting, limitation de connexions, load balancing) |
+| Application | Python/Flask (vote), Node.js (result), .NET (worker), Redis, PostgreSQL |
+| Tests d'attaque | k6 (simulation DDoS) |
+| Supervision | PowerShell, `docker stats`, export CSV |
+| Pare-feu hôte | Windows Defender Firewall |
+
+---
 
 ## 1. Architecture
 
@@ -11,7 +30,7 @@ pour valider l'efficacité des protections.
 Internet
    │
    ▼
- nginx              (reverse proxy + WAF / rate limiting)
+ nginx              (reverse proxy + rate limiting + load balancing)
    │  bridge-fr
    ▼
 frontend-global      (vote : Python/Flask port 5000, result : Node.js port 4000)
@@ -23,34 +42,61 @@ backend-global       (redis + worker .NET, non-root)
    db                (PostgreSQL, isolée)
 ```
 
-Règle stricte respectée : chaque conteneur ne communique qu'avec son voisin direct.
-`frontend-global` n'a plus aucun accès direct à `db` (correction apportée : les scores
-transitent désormais par un hash Redis `voted_counts`, plus par une requête SQL directe).
+L'application d'origine (5 conteneurs sur un réseau plat) a été restructurée en
+**3 services isolés** derrière NGINX, sur **3 réseaux bridge dédiés**.
 
-## 2. Fichiers clés du dossier
+Règle stricte : chaque conteneur ne communique qu'avec son voisin direct.
+
+**Faille détectée et corrigée :** dans la version initiale, `frontend-global` accédait
+directement à la base de données (`bridge-db`), ce qui cassait la segmentation.
+Correction : les scores transitent désormais par un hash Redis `voted_counts`
+(alimenté par le worker .NET), et non plus par une requête SQL directe depuis le frontend.
+
+---
+
+## 2. Les protections en place
+
+1. **Segmentation réseau** — 3 bridges Docker dédiés, aucun accès direct frontend vers db.
+2. **Pare-feu hôte** (Windows Defender Firewall) — seuls les ports 80/81 sont ouverts.
+3. **Rate limiting NGINX** — 10 requêtes/s par IP, rafale tolérée de 20 ; au-delà, réponse `503`.
+   Limitation du nombre de connexions simultanées par IP.
+4. **Durcissement des conteneurs** — utilisateurs non-root, limites CPU/RAM par service.
+5. **Load balancing** — `frontend-global` répliqué, réparti par NGINX
+   (`least_conn` pour le vote, `ip_hash` pour les résultats en WebSocket).
+6. **Supervision** — `supervision.ps1` surveille CPU/RAM en continu, alerte au-delà de 80 %,
+   journal exporté en CSV.
+
+---
+
+## 3. Fichiers clés
 
 | Fichier | Rôle |
 |---|---|
-| `docker-compose.yml` | Définition des 4 services, réseaux, limites CPU/RAM |
-| `nginx.conf` | Config nginx : reverse proxy, WAF, rate limiting, load balancing |
-| `nginx.conf.protected.bak` | Sauvegarde de la config nginx **protégée** (à restaurer après tout test) |
+| `docker-compose.yml` | Services, réseaux, limites CPU/RAM |
+| `nginx.conf` | Reverse proxy, rate limiting, load balancing |
+| `nginx.conf.protected.bak` | Sauvegarde de la config **protégée** (à restaurer après tout test) |
 | `backend/`, `frontend/` | Code source des services (Dockerfiles inclus) |
-| `attack-test.js` | Script **k6** — définit l'attaque DDoS simulée (150 utilisateurs virtuels, 30s) |
-| `supervision.ps1` | Script PowerShell — surveille en continu le CPU/RAM de chaque conteneur, alerte si > 80% |
+| `attack-test.js` | Script **k6** : attaque DDoS simulée (150 utilisateurs virtuels, 30 s) |
+| `supervision.ps1` | Surveillance CPU/RAM de chaque conteneur, alerte si > 80 % |
 | `supervision-log.csv` | Journal généré par `supervision.ps1` |
-| `docker-stats-*.txt` | Captures de consommation CPU/RAM prises pendant les différents tests |
+| `docker-stats-*.txt` | Relevés CPU/RAM pris pendant les différents tests |
 
-## 3. Comment démarrer le projet
+---
+
+## 4. Lancer le projet
+
+Prérequis : Docker Desktop, k6 (`winget install k6 --source winget`).
 
 ```powershell
-cd chemin\vers\cyber
+git clone https://github.com/khaoulalam-charef/cybersecurity-docker.git
+cd cybersecurity-docker
 docker compose up -d
 docker compose ps          # vérifier que tout est "Up"
 ```
 
 Accès : `http://localhost:80` (vote) et `http://localhost:81` (result).
 
-**Avant tout lancement, vérifier que la protection est active** (aucun `#` devant ces lignes) :
+**Vérifier que la protection est active** (aucun `#` devant ces lignes) :
 ```powershell
 Get-Content nginx.conf | Select-String "limit_req zone|limit_conn conn_zone"
 ```
@@ -60,24 +106,16 @@ Copy-Item nginx.conf.protected.bak nginx.conf -Force
 docker compose restart nginx
 ```
 
-## 4. Les protections en place
+---
 
-1. **Segmentation réseau** — 3 bridges Docker dédiés, aucun accès direct frontend→db.
-2. **Pare-feu hôte** (Windows Defender Firewall) — seuls les ports 80/81 sont ouverts.
-3. **WAF / rate limiting nginx** — 10 requêtes/s par IP, rafale tolérée de 20 ; au-delà, réponse `503`.
-4. **Durcissement des conteneurs** — limites CPU/RAM par service, utilisateurs non-root.
-5. **Load balancing** — `frontend-global` peut être répliqué (voir section 6), réparti via nginx.
-6. **Garde de supervision** — `supervision.ps1` surveille CPU/RAM en continu.
+## 5. Relancer un test DDoS
 
-## 5. Comment relancer un test DDoS (attack-test.js)
-
-`attack-test.js` ne s'exécute pas seul de façon utile : il faut le lancer **en tâche de
-fond** pendant qu'on capture la consommation CPU/RAM des conteneurs en parallèle — c'est
-ce que fait le bloc PowerShell ci-dessous.
+L'attaque k6 tourne en arrière-plan pendant qu'on relève la consommation CPU/RAM des
+conteneurs toutes les 2 secondes :
 
 ```powershell
 Remove-Item docker-stats-test.txt -ErrorAction SilentlyContinue
-$job = Start-Job -ScriptBlock { Set-Location "chemin\vers\cyber"; k6 run attack-test.js }
+$job = Start-Job -ScriptBlock { Set-Location $using:PWD; k6 run attack-test.js }
 Start-Sleep -Seconds 2
 1..15 | ForEach-Object {
     docker stats --no-stream | Out-File -Append docker-stats-test.txt
@@ -89,39 +127,60 @@ Receive-Job $job -Wait
 Remove-Job $job
 ```
 
-Ce que fait chaque partie :
-- `Start-Job` lance l'attaque k6 **en arrière-plan**, pour libérer le terminal.
-- La boucle `1..15` prend une photo de `docker stats` toutes les 2s pendant les 30s de l'attaque, et l'enregistre dans un fichier `.txt`.
-- `Receive-Job` récupère à la fin le résumé de l'attaque (nombre de requêtes, taux d'échec, latence).
+- `Start-Job` lance l'attaque k6 en arrière-plan.
+- La boucle `1..15` enregistre `docker stats` toutes les 2 s pendant les 30 s de l'attaque.
+- `Receive-Job` affiche le résumé k6 (nombre de requêtes, taux d'échec, latence).
 
-**Prérequis** : k6 doit être installé (`winget install k6 --source winget`).
+---
 
-## 6. Comment tester le load balancing (plusieurs instances)
+## 6. Tester le load balancing
 
 ```powershell
 docker compose up -d --scale frontend-global=3
-docker compose restart nginx     # nginx doit redémarrer pour détecter les nouvelles instances
+docker compose restart nginx     # NGINX doit redémarrer pour détecter les nouvelles instances
 docker compose ps                # doit afficher frontend-global-1/2/3
 ```
 
-⚠️ Pour observer un effet visible du load balancing, il faut **désactiver temporairement
-le rate limiting** (sinon nginx filtre l'essentiel du trafic avant même qu'il n'atteigne
-les instances, et on ne voit aucune différence). Commenter les lignes `limit_req`/
-`limit_conn` dans `nginx.conf`, `docker compose restart nginx`, relancer le test (section 5),
-puis **impérativement restaurer la config protégée** ensuite (`nginx.conf.protected.bak`).
+Pour observer l'effet du load balancing, il faut **désactiver temporairement le rate
+limiting** (sinon NGINX rejette l'essentiel du trafic avant qu'il n'atteigne les instances).
+Commenter les lignes `limit_req` / `limit_conn` dans `nginx.conf`, redémarrer NGINX,
+relancer le test (section 5), puis **restaurer impérativement la config protégée**.
 
-## 7. Résultats de référence (déjà mesurés)
+---
+
+## 7. Résultats mesurés
+
+Protocole : même script k6 (150 utilisateurs virtuels, 30 s), lancé en local,
+dans chaque configuration. CPU relevé avec `docker stats` pendant l'attaque.
 
 | Scénario | Requêtes échouées | CPU frontend (pic) |
 |---|---|---|
-| 1 instance, sans protection | ~41% (coupures brutales) | 95-98% |
-| 1 instance, rate limiting actif | ~99% (rejet propre en 503) | ~4% |
-| 3 instances (load balancing), rate limiting désactivé | ~0% | 50-65% par instance |
+| 1 instance, sans protection | ~41 % (coupures brutales) | 95-98 % |
+| 1 instance, rate limiting actif | ~99 % (rejet propre en 503) | ~4 % |
+| 3 instances (load balancing), rate limiting désactivé | ~0 % | 50-65 % par instance |
 
-## 8. Point de vigilance connu
+**Lecture :** sans protection, le frontend sature et coupe brutalement ~41 % des requêtes.
+Avec le rate limiting, NGINX rejette proprement le trafic abusif en amont et le frontend
+reste quasiment au repos. Le load balancing, lui, répartit la charge légitime entre les instances.
 
-Le rate limiting nginx filtre **par adresse IP**. En test local, l'attaque et
-l'utilisateur qui teste depuis le même PC partagent la même IP (`127.0.0.1`) — donc un
-test manuel pendant l'attaque peut lui aussi recevoir un `503`. En production, avec des
-utilisateurs et attaquants sur des IP différentes, ce comportement ne pose pas de
-problème pour les utilisateurs légitimes.
+<!-- Ajouter ici 2 ou 3 captures : résumé k6 sans / avec protection, docker stats -->
+
+---
+
+## 8. Limites et pistes d'amélioration
+
+- **Test local depuis une seule IP** : le rate limiting filtre par adresse IP. En local,
+  l'attaque et l'utilisateur partagent la même IP (`127.0.0.1`), donc un test manuel pendant
+  l'attaque reçoit aussi des `503`. En production, utilisateurs et attaquants ont des IP
+  différentes.
+- **Une vraie attaque DDoS distribuée** (milliers d'IP) se traite plutôt en amont : CDN,
+  WAF cloud (ex. Google Cloud Armor). C'est la suite logique de ce projet, que je transpose
+  actuellement sur Google Cloud (architecture Zero Trust).
+- Pistes : TLS sur NGINX, scan des images (Trivy), secrets hors du `docker-compose.yml`.
+
+---
+
+## Crédits
+
+Application de base : [dockersamples/example-voting-app](https://github.com/dockersamples/example-voting-app).
+Travail de sécurisation, tests et documentation : Khaoula Lamcharef.
