@@ -45,6 +45,11 @@ backend-global       (redis + worker .NET, non-root)
 L'application d'origine (5 conteneurs sur un réseau plat) a été restructurée en
 **3 services isolés** derrière NGINX, sur **3 réseaux bridge dédiés**.
 
+Pour comparaison, l'architecture d'origine de `dockersamples` : tous les conteneurs
+partagent le même réseau et `result` lit directement la base `db`.
+
+![Architecture d'origine (dockersamples)](architecture.excalidraw.png)
+
 Règle stricte : chaque conteneur ne communique qu'avec son voisin direct.
 
 **Faille détectée et corrigée :** dans la version initiale, `frontend-global` accédait
@@ -61,8 +66,8 @@ Correction : les scores transitent désormais par un hash Redis `voted_counts`
 3. **Rate limiting NGINX** — 10 requêtes/s par IP, rafale tolérée de 20 ; au-delà, réponse `503`.
    Limitation du nombre de connexions simultanées par IP.
 4. **Durcissement des conteneurs** — utilisateurs non-root, limites CPU/RAM par service.
-5. **Load balancing** — `frontend-global` répliqué, réparti par NGINX
-   (`least_conn` pour le vote, `ip_hash` pour les résultats en WebSocket).
+5. **Load balancing** — `frontend-global` répliqué (`--scale`), NGINX répartit les
+   requêtes entre les instances (round-robin).
 6. **Supervision** — `supervision.ps1` surveille CPU/RAM en continu, alerte au-delà de 80 %,
    journal exporté en CSV.
 
@@ -73,13 +78,15 @@ Correction : les scores transitent désormais par un hash Redis `voted_counts`
 | Fichier | Rôle |
 |---|---|
 | `docker-compose.yml` | Services, réseaux, limites CPU/RAM |
-| `nginx.conf` | Reverse proxy, rate limiting, load balancing |
-| `nginx.conf.protected.bak` | Sauvegarde de la config **protégée** (à restaurer après tout test) |
+| `nginx.conf` | Reverse proxy, rate limiting, load balancing (version protégée) |
 | `backend/`, `frontend/` | Code source des services (Dockerfiles inclus) |
 | `attack-test.js` | Script **k6** : attaque DDoS simulée (150 utilisateurs virtuels, 30 s) |
 | `supervision.ps1` | Surveillance CPU/RAM de chaque conteneur, alerte si > 80 % |
-| `supervision-log.csv` | Journal généré par `supervision.ps1` |
-| `docker-stats-*.txt` | Relevés CPU/RAM pris pendant les différents tests |
+| `test_vote_playwright.py`, `test_vote_automatise.py` | Tests fonctionnels Playwright et Selenium |
+| `.github/workflows/tests.yml` | Pipeline CI GitHub Actions |
+
+Les fichiers générés pendant les tests (`supervision-log.csv`, `docker-stats-*.txt`) et la
+sauvegarde `nginx.conf.protected.bak` restent en local (exclus par `.gitignore`).
 
 ---
 
@@ -99,11 +106,6 @@ Accès : `http://localhost:80` (vote) et `http://localhost:81` (result).
 **Vérifier que la protection est active** (aucun `#` devant ces lignes) :
 ```powershell
 Get-Content nginx.conf | Select-String "limit_req zone|limit_conn conn_zone"
-```
-Si des lignes sont commentées, restaurer la version protégée :
-```powershell
-Copy-Item nginx.conf.protected.bak nginx.conf -Force
-docker compose restart nginx
 ```
 
 ---
@@ -143,8 +145,15 @@ docker compose ps                # doit afficher frontend-global-1/2/3
 
 Pour observer l'effet du load balancing, il faut **désactiver temporairement le rate
 limiting** (sinon NGINX rejette l'essentiel du trafic avant qu'il n'atteigne les instances).
+```powershell
+Copy-Item nginx.conf nginx.conf.protected.bak    # sauvegarder la version protégée
+```
 Commenter les lignes `limit_req` / `limit_conn` dans `nginx.conf`, redémarrer NGINX,
-relancer le test (section 5), puis **restaurer impérativement la config protégée**.
+relancer le test (section 5), puis **restaurer impérativement la config protégée** :
+```powershell
+Copy-Item nginx.conf.protected.bak nginx.conf -Force
+docker compose restart nginx
+```
 
 ---
 
@@ -167,7 +176,24 @@ reste quasiment au repos. Le load balancing, lui, répartit la charge légitime 
 
 ---
 
-## 8. Limites et pistes d'amélioration
+## 8. Tests automatisés et CI (ajout personnel)
+
+En complément du travail de sécurisation, j'ai ajouté des tests fonctionnels de bout en bout :
+
+- `test_vote_playwright.py` (Playwright) et `test_vote_automatise.py` (Selenium) :
+  vote, puis vérification de la mise à jour des résultats.
+- `.github/workflows/tests.yml` : à chaque push sur `main`, GitHub Actions démarre
+  l'application avec Docker Compose et lance les tests Playwright.
+
+```powershell
+pip install pytest playwright pytest-playwright
+playwright install chromium
+pytest test_vote_playwright.py -v
+```
+
+---
+
+## 9. Limites et pistes d'amélioration
 
 - **Test local depuis une seule IP** : le rate limiting filtre par adresse IP. En local,
   l'attaque et l'utilisateur partagent la même IP (`127.0.0.1`), donc un test manuel pendant
